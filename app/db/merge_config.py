@@ -11,20 +11,19 @@ logger = logging.getLogger(__name__)
 # По этим полям будет определяться уникальность записи при обновлении
 # Формат: 'table_name': ['field1', 'field2', ...]
 MERGE_CONFIG: Dict[str, List[str]] = {
-    'customers': ['customer_id'],
-    'orders': ['order_id'],
-    'order_items': ['order_id', 'product_id'],
-    'products': ['product_id'],
-    'categories': ['category_id'],
-    'users': ['user_id'],
-    'transactions': ['transaction_id'],
-    'inventory': ['inventory_id'],
-    'suppliers': ['supplier_id'],
-    'employees': ['employee_id'],
-    # Аналитические таблицы
-    'category_sales': ['category'],
-    'customer_activity': ['customer_id'],
-    # Добавьте другие таблицы при необходимости
+    'analytics_orders': ['id'],
+    'analytics_services': ['id'],
+    'avia_coupons': ['id'],
+    'analytics_flights': ['id'],
+    'analytics_clients': ['id'],
+    'analytics_avia_ticket_service_data': ['id'],
+    'analytics_service_flight_relations': ['service_id'],
+    'analytics_order_legs': ['order_id'],
+    'analytics_service_data': ['service_id'],
+    'analytics_emd_service_data': ['id'],
+    'analytics_promo_code_usages': ['promo_code_id'],
+    'analytics_flight_provider_data': ['id'],
+    
 }
 
 # Запасные поля для проверки в качестве первичных ключей
