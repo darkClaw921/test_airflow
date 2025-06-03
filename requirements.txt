@@ -1,0 +1,7 @@
+mysql-connector-python
+clickhouse-connect
+apache-airflow
+python-dotenv
+pandas
+SQLAlchemy
+loguru
