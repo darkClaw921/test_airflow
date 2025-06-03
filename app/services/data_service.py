@@ -34,7 +34,8 @@ class DataService:
         Returns:
             Структура таблицы
         """
-        database_name = self.mysql_client.connection_config.database
+        # database_name = self.mysql_client.connection_config.database
+        database_name = self.mysql_client.connection_config.name
         
         # Получаем структуру таблицы из MySQL
         table_structure = self.mysql_client.get_table_structure(table_name)
@@ -57,13 +58,11 @@ class DataService:
         Returns:
             Кортеж (прочитано записей, записано в ClickHouse)
         """
-        database_name = self.mysql_client.connection_config.database
+        # database_name = self.mysql_client.connection_config.database
+        database_name = self.mysql_client.connection_config.name
         
         # Убедимся, что таблица существует в ClickHouse
         self.ensure_table_exists(table_name)
-        
-        # Удаляем существующие данные для этой таблицы в ClickHouse
-        self.clickhouse_client.delete_data(database_name, table_name)
         
         # Получаем общее количество строк для обработки
         total_rows = self.mysql_client.get_row_count(table_name)
@@ -74,6 +73,9 @@ class DataService:
         total_processed = 0
         total_written = 0
         
+        # Собираем все пакеты данных для эффективной обработки
+        all_data = []
+        
         while True:
             # Читаем пакет данных из MySQL
             batch_data, records_read = self.mysql_client.read_data_batch(table_name, offset, BATCH_SIZE)
@@ -82,18 +84,24 @@ class DataService:
                 break
                 
             total_processed += records_read
+            all_data.extend(batch_data)
             
-            # Записываем данные в ClickHouse
-            records_written = self.clickhouse_client.insert_data(database_name, table_name, batch_data)
-            total_written += records_written
-            
-            logger.info(f"Прогресс: {total_processed}/{total_rows} строк ({int(total_processed/total_rows*100) if total_rows else 100}%)")
+            logger.info(f"Прогресс чтения: {total_processed}/{total_rows} строк ({int(total_processed/total_rows*100) if total_rows else 100}%)")
             
             # Переходим к следующему пакету
             offset += BATCH_SIZE
             
             if records_read < BATCH_SIZE:
                 break
+        
+        # Используем batch_merge_data для обновления или вставки данных
+        if all_data:
+            total_written = self.clickhouse_client.batch_merge_data(
+                database_name=database_name,
+                table_name=table_name,
+                data=all_data,
+                batch_size=50000  # Оптимальный размер пакета
+            )
                 
-        logger.info(f"Обработка таблицы '{table_name}' завершена: прочитано {total_processed}, записано {total_written}")
+        logger.info(f"Обработка таблицы '{table_name}' завершена: прочитано {total_processed}, обработано {total_written}")
         return total_processed, total_written 

@@ -13,6 +13,8 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 
 from app.db.mysql import ServiceDBClient, MySQLClient
+from app.db.clickhouse import ClickHouseClient
+from app.config import CLICKHOUSE
 from loguru import logger
 
 # Настройка логирования
@@ -98,29 +100,38 @@ def load_to_clickhouse(table_name, **kwargs):
             logger.error(f"Данные для таблицы {table_name} не найдены в XCom")
             raise ValueError(f"Данные для таблицы {table_name} не найдены в XCom")
         
-        # Преобразуем JSON в DataFrame
-        df = pd.read_json(json_data, orient='records')
+        # Преобразуем JSON в список словарей
+        data = pd.read_json(json_data, orient='records').to_dict('records')
         
         # Проверяем наличие данных для загрузки
-        if len(df) == 0:
+        if len(data) == 0:
             logger.warning(f"Нет данных для загрузки в таблицу {table_name}")
             return f"Загрузка в {table_name} пропущена: нет данных"
         
-
-        # Подключение к ClickHouse
-        client = get_client(
-            host=os.getenv('CLICKHOUSE_HOST'),
-            port=os.getenv('CLICKHOUSE_PORT'),
-            username=os.getenv('CLICKHOUSE_USER'),
-            password=os.getenv('CLICKHOUSE_PASSWORD')
-        )
+        # Получаем первое активное соединение MySQL из сервисной БД для имени базы данных
+        with ServiceDBClient() as service_client:
+            mysql_connections = service_client.get_mysql_connections(enabled_only=True)
         
-        # Загружаем данные в ClickHouse
-        client.insert_df(f'analytics.{table_name}', df)
+        if not mysql_connections:
+            logger.error("Не найдено активных соединений MySQL")
+            raise ValueError("Не найдено активных соединений MySQL")
         
-        logger.info(f"Загружено {len(df)} записей в таблицу {table_name} в ClickHouse")
+        # Используем имя первого доступного соединения как имя базы данных-источника
+        database_name = mysql_connections[0].name
         
-        return f"Загрузка данных в {table_name} завершена успешно"
+        # Создаем клиент ClickHouse и используем новый метод merge_data
+        with ClickHouseClient() as clickhouse_client:
+            # Используем пакетную обработку для больших объемов данных
+            processed = clickhouse_client.batch_merge_data(
+                database_name=database_name, 
+                table_name=table_name,
+                data=data,
+                batch_size=50000  # Оптимальный размер пакета
+            )
+            
+        logger.info(f"Обработано {processed} записей в таблице {table_name} в ClickHouse")
+        
+        return f"Загрузка данных в {table_name} завершена успешно (обработано {processed} записей)"
     except Exception as e:
         logger.error(f"Ошибка при загрузке данных в {table_name}: {str(e)}")
         raise
@@ -151,30 +162,24 @@ def refresh_materialized_views(**kwargs):
     logger.info("Обновление материализованных представлений в ClickHouse")
     
     try:
-        # Подключение к ClickHouse
-        client = get_client(
-            host=os.getenv('CLICKHOUSE_HOST'),
-            port=os.getenv('CLICKHOUSE_PORT'),
-            username=os.getenv('CLICKHOUSE_USER'),
-            password=os.getenv('CLICKHOUSE_PASSWORD')
-        )
-        
-        # Список материализованных представлений для обновления
-        views = [
-            'mv_category_sales',
-            'mv_daily_sales',
-            'mv_customer_activity',
-            'mv_product_popularity'
-        ]
-        
-        for view in views:
-            try:
-                # Выполняем запрос для обновления представления
-                client.command(f"OPTIMIZE TABLE analytics.{view} FINAL")
-                logger.info(f"Представление {view} успешно обновлено")
-            except Exception as e:
-                logger.error(f"Ошибка при обновлении представления {view}: {e}")
-        
+        # Создаем клиент ClickHouse
+        with ClickHouseClient() as clickhouse_client:
+            # Список материализованных представлений для обновления
+            views = [
+                'mv_category_sales',
+                'mv_daily_sales',
+                'mv_customer_activity',
+                'mv_product_popularity'
+            ]
+            
+            for view in views:
+                try:
+                    # Выполняем запрос для обновления представления
+                    clickhouse_client.client.command(f"OPTIMIZE TABLE {clickhouse_client.config['database']}.{view} FINAL")
+                    logger.info(f"Представление {view} успешно обновлено")
+                except Exception as e:
+                    logger.error(f"Ошибка при обновлении представления {view}: {e}")
+            
         return "Обновление материализованных представлений завершено"
     except Exception as e:
         logger.error(f"Ошибка при обновлении материализованных представлений: {str(e)}")
