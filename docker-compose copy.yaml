@@ -85,8 +85,7 @@ x-airflow-common:
       condition: service_healthy
     postgres:
       condition: service_healthy
-  networks:
-    - datastream-network
+
 services:
   postgres:
     image: postgres:13
@@ -102,8 +101,13 @@ services:
       retries: 5
       start_period: 5s
     restart: always
-    networks:
-      - datastream-network
+  portainer:
+    image: portainer/portainer-ce
+      #ports:
+      #- 9000:9000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
   redis:
     # Redis is limited to 7.2-bookworm due to licencing change
     # https://redis.io/blog/redis-adopts-dual-source-available-licensing/
@@ -117,8 +121,7 @@ services:
       retries: 50
       start_period: 30s
     restart: always
-    networks:
-      - datastream-network
+
   airflow-apiserver:
     <<: *airflow-common
     command: api-server
@@ -135,8 +138,7 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    networks:
-      - datastream-network
+
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
@@ -151,8 +153,7 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    networks:
-      - datastream-network
+
   airflow-dag-processor:
     <<: *airflow-common
     command: dag-processor
@@ -167,8 +168,7 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    networks:
-      - datastream-network
+
   airflow-worker:
     <<: *airflow-common
     command: celery worker
@@ -193,8 +193,7 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
-    networks:
-      - datastream-network
+
   airflow-triggerer:
     <<: *airflow-common
     command: triggerer
@@ -209,8 +208,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    networks:
-      - datastream-network
 
   airflow-init:
     <<: *airflow-common
@@ -303,8 +300,6 @@ services:
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
       _PIP_ADDITIONAL_REQUIREMENTS: 'mysql-connector-python clickhouse-connect apache-airflow python-dotenv pandas SQLAlchemy loguru'
     user: "0:0"
-    networks:
-      - datastream-network
 
   airflow-cli:
     <<: *airflow-common
@@ -320,26 +315,10 @@ services:
       - airflow
     depends_on:
       <<: *airflow-common-depends-on
-    networks:
-      - datastream-network
 
   # You can enable flower by adding "--profile flower" option e.g. docker-compose --profile flower up
   # or by explicitly targeted on the command line e.g. docker-compose up flower.
   # See: https://docs.docker.com/compose/profiles/
-  mysql:
-    image: mysql:8.0
-    environment:
-      MYSQL_ROOT_PASSWORD: datastream
-      MYSQL_DATABASE: datastream
-      MYSQL_USER: datastream
-      MYSQL_PASSWORD: datastream
-    ports:
-      - "3306:3306"
-    networks:
-      - datastream-network
-    volumes:
-      - mysql-data:/var/lib/mysql
-  
   flower:
     <<: *airflow-common
     command: celery flower
@@ -358,13 +337,6 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
-    networks:
-      - datastream-network
 
 volumes:
   postgres-db-volume:
-  mysql-data:
-
-networks:
-  datastream-network:
-    driver: bridge

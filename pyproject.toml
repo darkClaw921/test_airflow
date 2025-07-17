@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "apache-airflow>=3.0.1",
     "clickhouse-connect>=0.8.17",
+    "loguru>=0.7.3",
     "mysql-connector-python>=9.3.0",
     "pandas>=2.2.3",
     "python-dotenv>=1.1.0",

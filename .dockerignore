@@ -1,0 +1,32 @@
+# Системные файлы
+**/.git
+**/.gitignore
+**/.vscode
+**/.idea
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.Python
+**/.DS_Store
+
+# Виртуальные окружения
+**/env
+**/venv
+**/.env
+**/.venv
+
+# Логи и временные файлы
+**/logs
+**/*.log
+**/*.sqlite
+**/*.db
+
+# Исключаем всё, что не нужно для запуска
+!app/**
+!dags/**
+!plugins/**
+!config/**
+!requirements.txt
+!pyproject.toml
+!uv.lock 

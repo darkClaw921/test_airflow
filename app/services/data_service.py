@@ -100,7 +100,7 @@ class DataService:
                 database_name=database_name,
                 table_name=table_name,
                 data=all_data,
-                batch_size=50000  # Оптимальный размер пакета
+                batch_size=5000  # Оптимальный размер пакета
             )
                 
         logger.info(f"Обработка таблицы '{table_name}' завершена: прочитано {total_processed}, обработано {total_written}")

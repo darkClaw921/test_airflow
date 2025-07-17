@@ -1,7 +1,7 @@
 """
 Модуль для работы с ClickHouse
 """
-import logging
+import time
 from typing import List, Dict, Any, Optional, Union, Tuple
 import pandas as pd
 import uuid
@@ -9,12 +9,11 @@ import uuid
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 from clickhouse_connect.driver.exceptions import ClickHouseError
+from loguru import logger
 
 from app.models.service_db import TableStructure
 from app.config import CLICKHOUSE
 from app.db.merge_config import get_key_fields
-
-logger = logging.getLogger(__name__)
 
 
 def mysql_type_to_clickhouse(mysql_type: str) -> str:
@@ -109,13 +108,13 @@ class ClickHouseClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.disconnect()
         
-    def create_table(self, database_name: str, table_structure: TableStructure, engine: str = 'MergeTree()') -> bool:
-        """Создает таблицу в ClickHouse на основе структуры MySQL
+    def create_table(self, database_name: str, table_structure: TableStructure, engine: str = None) -> bool:
+        """Создает таблицу в ClickHouse с движком ReplacingMergeTree
         
         Args:
             database_name: Имя базы данных-источника (используется как префикс для таблицы)
             table_structure: Структура таблицы
-            engine: Движок таблицы ClickHouse
+            engine: Движок таблицы ClickHouse (если не указан, используется ReplacingMergeTree)
             
         Returns:
             True если таблица создана успешно
@@ -123,8 +122,6 @@ class ClickHouseClient:
         if not self.client:
             self.connect()
             
-        # Формируем имя таблицы с префиксом базы данных для уникальности
-        # table_name = f"{database_name}__{table_structure.name}"
         table_name = f"{table_structure.name}"
         
         # Формируем SQL для создания таблицы
@@ -134,17 +131,25 @@ class ClickHouseClient:
             nullable = 'Nullable(' + ch_type + ')' if column['nullable'] else ch_type
             columns_sql.append(f"`{column['name']}` {nullable}")
         
-        # Добавляем поле для обозначения источника данных
+        # Добавляем служебные поля
         columns_sql.append("`_source_database` String")
+        columns_sql.append("`_version` UInt64")  # Версионный столбец для ReplacingMergeTree
         
-        # Определяем первичный ключ или используем ORDER BY
-        order_by = ''
-        if table_structure.primary_key:
-            primary_key_cols = [f"`{col}`" for col in table_structure.primary_key]
-            order_by = f"ORDER BY ({', '.join(primary_key_cols)})"
-        else:
-            # Если первичного ключа нет, используем первую колонку
-            order_by = f"ORDER BY (`{table_structure.columns[0]['name']}`)"
+        # Получаем ключевые поля для ORDER BY
+        column_names = [col['name'] for col in table_structure.columns]
+        key_fields = get_key_fields(table_structure.name, column_names)
+        
+        # Формируем ORDER BY с ключевыми полями
+        order_by_fields = [f"`{field}`" for field in key_fields if field in column_names]
+        if not order_by_fields:
+            # Если ключевые поля не найдены, используем первую колонку
+            order_by_fields = [f"`{table_structure.columns[0]['name']}`"]
+        
+        order_by = f"ORDER BY ({', '.join(order_by_fields)})"
+        
+        # Используем ReplacingMergeTree с версионным столбцом
+        if not engine:
+            engine = "ReplacingMergeTree(_version)"
             
         # Формируем полный SQL запрос
         create_sql = f"""
@@ -155,7 +160,7 @@ class ClickHouseClient:
         
         try:
             self.client.command(create_sql)
-            logger.info(f"Создана таблица '{table_name}' в ClickHouse")
+            logger.info(f"Создана таблица '{table_name}' в ClickHouse с движком {engine}")
             return True
         except ClickHouseError as err:
             logger.error(f"Ошибка создания таблицы '{table_name}' в ClickHouse: {err}")
@@ -174,7 +179,6 @@ class ClickHouseClient:
         if not self.client:
             self.connect()
             
-        # full_table_name = f"{database_name}__{table_name}"
         full_table_name = f"{table_name}"
         
         try:
@@ -206,13 +210,14 @@ class ClickHouseClient:
             logger.warning("Вставка пропущена: нет данных для вставки")
             return 0
             
-        # full_table_name = f"{database_name}__{table_name}"
         full_table_name = f"{table_name}"
         
         try:
-            # Добавляем поле источника к каждой записи
+            # Добавляем служебные поля к каждой записи
+            current_version = int(time.time() * 1000000)  # Микросекунды как версия
             for row in data:
                 row['_source_database'] = database_name
+                row['_version'] = current_version
                 
             # Используем pandas DataFrame для вставки данных
             df = pd.DataFrame(data)
@@ -238,7 +243,6 @@ class ClickHouseClient:
         if not self.client:
             self.connect()
             
-        # full_table_name = f"{database_name}__{table_name}"
         full_table_name = f"{table_name}"
         
         try:
@@ -269,7 +273,6 @@ class ClickHouseClient:
         if not self.client:
             self.connect()
             
-        # full_table_name = f"{database_name}__{table_name}"
         full_table_name = f"{table_name}"
         
         try:
@@ -286,7 +289,10 @@ class ClickHouseClient:
             return 0 
             
     def merge_data(self, database_name: str, table_name: str, data: List[Dict[str, Any]]) -> int:
-        """Вставляет или обновляет данные в таблице ClickHouse используя временные таблицы
+        """Вставляет или обновляет данные в таблице ClickHouse используя ReplacingMergeTree
+        
+        Для ReplacingMergeTree просто делаем INSERT с новой версией.
+        Движок автоматически заменит старые записи новыми при слиянии.
         
         Args:
             database_name: Имя базы данных-источника (используется как префикс для таблицы)
@@ -303,131 +309,29 @@ class ClickHouseClient:
             logger.warning("Синхронизация пропущена: нет данных для обработки")
             return 0
             
-        # full_table_name = f"{database_name}__{table_name}"
         full_table_name = f"{table_name}"
         target_table = f"{self.config['database']}.{full_table_name}"
         
         try:
-            # Добавляем поле источника к каждой записи
+            # Добавляем служебные поля к каждой записи
+            current_version = int(time.time() * 1000000)  # Микросекунды как версия
             for row in data:
                 row['_source_database'] = database_name
+                row['_version'] = current_version
                 
-            # 1. Создаем временную таблицу с таким же схемой
-            temp_table_name = f"temp__{full_table_name}__{uuid.uuid4().hex[:8]}"
-            temp_table = f"{self.config['database']}.{temp_table_name}"
-            
-            # Получаем структуру целевой таблицы
-            structure_query = f"DESCRIBE TABLE {target_table}"
-            structure_result = self.client.query(structure_query)
-            
-            # Формируем список полей для создания временной таблицы и собираем имена колонок
-            columns_sql = []
-            column_names = []
-            for row in structure_result.result_rows:
-                column_name, column_type = row[0], row[1]
-                columns_sql.append(f"`{column_name}` {column_type}")
-                column_names.append(column_name)
-            
-            # Получаем ключевые поля для сравнения записей с проверкой их наличия
-            key_fields = get_key_fields(table_name, column_names)
-            
-            # Проверяем, что все необходимые ключевые поля присутствуют в данных
-            for key_field in key_fields:
-                if key_field not in column_names:
-                    raise ValueError(f"Ключевое поле '{key_field}' отсутствует в таблице '{full_table_name}'")
-            
-            logger.info(f"Для таблицы '{full_table_name}' используются ключевые поля: {key_fields}")
-            
-            # Создаем временную таблицу с движком Memory для быстрой обработки
-            create_temp_sql = f"""
-            CREATE TABLE {temp_table} (
-                {','.join(columns_sql)}
-            ) ENGINE = Memory
-            """
-            self.client.command(create_temp_sql)
-            logger.debug(f"Создана временная таблица {temp_table}")
-            
-            # 2. Загружаем данные во временную таблицу
+            # Простая вставка - ReplacingMergeTree сам разберется с дублями
             df = pd.DataFrame(data)
-            self.client.insert_df(temp_table, df)
-            logger.debug(f"Загружено {len(data)} записей во временную таблицу {temp_table}")
+            self.client.insert_df(target_table, df)
             
-            # 3. Вместо DELETE + INSERT используем аналогичный подход с созданием временной таблицы
-            # для финального результата, содержащего все строки из основной таблицы, которые не будут заменены + новые данные
-            
-            # 3.1 Создаем временную таблицу для результата
-            result_table_name = f"result__{full_table_name}__{uuid.uuid4().hex[:8]}"
-            result_table = f"{self.config['database']}.{result_table_name}"
-            create_result_sql = f"""
-            CREATE TABLE {result_table} (
-                {','.join(columns_sql)}
-            ) ENGINE = Memory
-            """
-            self.client.command(create_result_sql)
-            
-            # 3.2 Формируем условие для исключения записей, которые будут заменены
-            where_conditions = []
-            for field in key_fields:
-                # Создаем подзапрос для поиска записей из временной таблицы с такими же ключами
-                where_conditions.append(f"""
-                NOT `{field}` IN (SELECT `{field}` FROM {temp_table} WHERE _source_database = '{database_name}')
-                """)
-                
-            if where_conditions:
-                where_condition = " OR ".join(where_conditions)
-                # 3.3 Копируем существующие записи, которые не будут заменены
-                copy_existing_sql = f"""
-                INSERT INTO {result_table} 
-                SELECT * FROM {target_table} 
-                WHERE (_source_database != '{database_name}') OR ({where_condition})
-                """
-                self.client.command(copy_existing_sql)
-            else:
-                # Если нет ключевых полей, просто копируем записи из других источников
-                copy_existing_sql = f"""
-                INSERT INTO {result_table} 
-                SELECT * FROM {target_table} 
-                WHERE _source_database != '{database_name}'
-                """
-                self.client.command(copy_existing_sql)
-            
-            # 3.4 Добавляем новые записи из временной таблицы
-            copy_new_sql = f"""
-            INSERT INTO {result_table} SELECT * FROM {temp_table}
-            """
-            self.client.command(copy_new_sql)
-            
-            # 3.5 Очищаем основную таблицу
-            self.client.command(f"TRUNCATE TABLE {target_table}")
-            
-            # 3.6 Копируем результат обратно в основную таблицу
-            restore_sql = f"""
-            INSERT INTO {target_table} SELECT * FROM {result_table}
-            """
-            self.client.command(restore_sql)
-            
-            # 4. Удаляем временные таблицы
-            self.client.command(f"DROP TABLE IF EXISTS {temp_table}")
-            self.client.command(f"DROP TABLE IF EXISTS {result_table}")
-            
-            logger.info(f"Обновлено/добавлено {len(data)} записей в таблицу '{full_table_name}'")
+            logger.info(f"Обновлено/добавлено {len(data)} записей в таблицу '{full_table_name}' с версией {current_version}")
             return len(data)
+            
         except ClickHouseError as err:
             logger.error(f"Ошибка при обновлении данных в таблице '{full_table_name}': {err}")
-            
-            # Попробуем удалить временные таблицы, если они остались
-            try:
-                if 'temp_table' in locals():
-                    self.client.command(f"DROP TABLE IF EXISTS {temp_table}")
-                if 'result_table' in locals():
-                    self.client.command(f"DROP TABLE IF EXISTS {result_table}")
-            except Exception:
-                pass
-                
             raise
 
     def batch_merge_data(self, database_name: str, table_name: str, data: List[Dict[str, Any]], 
-                    batch_size: int = 100000) -> int:
+                    batch_size: int = 10000) -> int:
         """Вставляет или обновляет данные в таблице ClickHouse с пакетной обработкой
         
         Разбивает большой набор данных на пакеты для более эффективной обработки
@@ -448,6 +352,9 @@ class ClickHouseClient:
         total_records = len(data)
         processed_records = 0
         
+        # Создаем единую версию для всего batch для консистентности
+        batch_version = int(time.time() * 1000000)
+        
         # Разбиваем данные на пакеты
         for i in range(0, total_records, batch_size):
             batch = data[i:i+batch_size]
@@ -457,15 +364,84 @@ class ClickHouseClient:
             logger.info(f"Обработка пакета {batch_num}/{total_batches} ({len(batch)} записей) для {database_name}/{table_name}")
             
             try:
-                # Обрабатываем текущий пакет
-                processed = self.merge_data(database_name, table_name, batch)
-                processed_records += processed
+                # Устанавливаем версию для текущего пакета (инкрементируем для каждого пакета)
+                current_batch_version = batch_version + batch_num
                 
-                logger.info(f"Пакет {batch_num}/{total_batches} успешно обработан ({processed} записей)")
+                # Добавляем служебные поля
+                for row in batch:
+                    row['_source_database'] = database_name
+                    row['_version'] = current_batch_version
+                
+                # Вставляем пакет
+                full_table_name = f"{table_name}"
+                target_table = f"{self.config['database']}.{full_table_name}"
+                df = pd.DataFrame(batch)
+                self.client.insert_df(target_table, df)
+                
+                processed_records += len(batch)
+                logger.info(f"Пакет {batch_num}/{total_batches} успешно обработан ({len(batch)} записей)")
+                
             except Exception as err:
                 logger.error(f"Ошибка обработки пакета {batch_num}/{total_batches}: {err}")
-                # Можно добавить механизм повторных попыток здесь
                 raise
         
         logger.info(f"Всего обработано {processed_records} записей для {database_name}/{table_name}")
-        return processed_records 
+        return processed_records
+        
+    def optimize_table(self, table_name: str) -> bool:
+        """Принудительно запускает слияние для таблицы ReplacingMergeTree
+        
+        Полезно для немедленного применения замен после вставки данных
+        
+        Args:
+            table_name: Имя таблицы
+            
+        Returns:
+            True если операция прошла успешно
+        """
+        if not self.client:
+            self.connect()
+            
+        try:
+            query = f"OPTIMIZE TABLE {self.config['database']}.{table_name} FINAL"
+            self.client.command(query)
+            logger.info(f"Запущено слияние для таблицы '{table_name}'")
+            return True
+        except ClickHouseError as err:
+            logger.error(f"Ошибка слияния таблицы '{table_name}': {err}")
+            return False
+            
+    def get_latest_data(self, table_name: str, condition: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Получает актуальные данные из таблицы ReplacingMergeTree
+        
+        Использует FINAL для получения только последних версий записей
+        
+        Args:
+            table_name: Имя таблицы
+            condition: Дополнительное условие WHERE
+            limit: Ограничение количества записей
+            
+        Returns:
+            Список актуальных записей
+        """
+        if not self.client:
+            self.connect()
+            
+        try:
+            query = f"SELECT * FROM {self.config['database']}.{table_name} FINAL"
+            if condition:
+                query += f" WHERE {condition}"
+            if limit:
+                query += f" LIMIT {limit}"
+                
+            result = self.client.query(query)
+            
+            # Преобразуем результат в список словарей
+            if result.result_rows:
+                columns = [col[0] for col in result.column_names]
+                return [dict(zip(columns, row)) for row in result.result_rows]
+            return []
+            
+        except ClickHouseError as err:
+            logger.error(f"Ошибка получения данных из таблицы '{table_name}': {err}")
+            return [] 

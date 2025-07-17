@@ -1,14 +1,18 @@
 """
 Конфигурация для слияния данных из MySQL в ClickHouse
 Определяет ключевые поля для сопоставления записей в таблицах
+
+Эти поля используются для:
+1. ORDER BY в таблицах ReplacingMergeTree 
+2. Идентификации уникальных записей при автоматическом слиянии
+3. Определения какие записи должны заменяться при обновлении
 """
 from typing import Dict, List, Optional
-import logging
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 # Словарь с ключевыми полями для каждой таблицы
 # По этим полям будет определяться уникальность записи при обновлении
+# В ReplacingMergeTree эти поля используются в ORDER BY для группировки записей
 # Формат: 'table_name': ['field1', 'field2', ...]
 MERGE_CONFIG: Dict[str, List[str]] = {
     'analytics_orders': ['id'],
@@ -27,18 +31,23 @@ MERGE_CONFIG: Dict[str, List[str]] = {
 }
 
 # Запасные поля для проверки в качестве первичных ключей
+# Используются если ключевые поля не определены или отсутствуют в таблице
 FALLBACK_KEY_FIELDS = ['id',]
 
 def get_key_fields(table_name: str, available_columns: Optional[List[str]] = None) -> List[str]:
     """
     Получает список ключевых полей для указанной таблицы
     
+    Эти поля будут использованы в ORDER BY для ReplacingMergeTree таблицы.
+    ReplacingMergeTree группирует записи по этим полям и оставляет только
+    запись с максимальной версией (_version) для каждой группы.
+    
     Args:
         table_name: Имя таблицы
         available_columns: Список доступных колонок для проверки наличия ключей
         
     Returns:
-        Список ключевых полей
+        Список ключевых полей для ORDER BY
     """
     # Сначала пробуем получить ключи из конфигурации
     key_fields = MERGE_CONFIG.get(table_name)
