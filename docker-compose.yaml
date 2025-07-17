@@ -339,7 +339,21 @@ services:
       - datastream-network
     volumes:
       - mysql-data:/var/lib/mysql
-  
+
+
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      PMA_USER: datastream
+      PMA_PASSWORD: datastream
+    ports:
+      - "8081:80"
+    networks:
+      - datastream-network
+
   flower:
     <<: *airflow-common
     command: celery flower
